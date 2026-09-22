@@ -1,0 +1,6 @@
+# Copy to backend.hcl and fill in (scripts/bootstrap-state.ps1 writes this file for you).
+# backend.hcl holds no secrets (names only); commit it so the CI workflows can initialise the backend.
+resource_group_name  = "rg-hs-tfstate-prod"
+storage_account_name = "sthstfprodx7k2"
+container_name       = "tfstate"
+key                  = "prod.tfstate"

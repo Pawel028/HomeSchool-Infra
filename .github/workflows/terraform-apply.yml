@@ -1,0 +1,97 @@
+# Applies Terraform.
+#   * push to main  -> applies DEV automatically.
+#   * workflow_dispatch (choose dev | nonprod | prod) -> applies that environment.
+#
+# APPROVALS: the job runs in the GitHub environment named after the target. Configure "Required reviewers" on the
+# `nonprod` and `prod` environments (Settings > Environments) so the job waits for a human before it starts. The Azure
+# federated credential is bound to that environment, so a run that is not approved cannot obtain an Azure token.
+# Restrict `prod` to the main branch (Deployment branches) as well.
+#
+# The plan is created and applied inside the same job (`terraform apply tfplan`), so exactly what was planned is
+# applied. Review the pull-request plan comments BEFORE merging or dispatching.
+#
+# First apply of a new environment: dispatch with api_bootstrap = true (placeholder image, API scaled to zero; see README),
+# then again with false after the backend pipeline has deployed the first image.
+name: terraform-apply
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "envs/**"
+      - "modules/**"
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Environment to apply
+        type: choice
+        options: [dev, nonprod, prod]
+        default: dev
+        required: true
+      api_bootstrap:
+        description: "First apply only: placeholder image, API scaled to zero (-var api_bootstrap=true)"
+        type: boolean
+        default: false
+
+permissions: {}
+
+concurrency:
+  group: terraform-apply-${{ inputs.environment || 'dev' }}
+  cancel-in-progress: false # never cancel an apply half-way: it would leave the state locked / resources partial
+
+jobs:
+  apply:
+    name: apply (${{ inputs.environment || 'dev' }})
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment || 'dev' }}
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      TF_VERSION: "1.9.8"
+      TF_IN_AUTOMATION: "true"
+      TF_INPUT: "false"
+      TF_ENV: ${{ inputs.environment || 'dev' }}
+      API_BOOTSTRAP: ${{ inputs.api_bootstrap || 'false' }}
+      ARM_USE_OIDC: "true"
+      ARM_CLIENT_ID: ${{ (inputs.environment || 'dev') == 'prod' && vars.AZURE_CLIENT_ID_PROD || ((inputs.environment || 'dev') == 'nonprod' && vars.AZURE_CLIENT_ID_NONPROD || vars.AZURE_CLIENT_ID_DEV) }}
+      ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: envs/${{ inputs.environment || 'dev' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: terraform init
+        run: terraform init -backend-config=backend.hcl
+
+      - name: terraform plan
+        run: |
+          set -euo pipefail
+          extra=()
+          if [ "${API_BOOTSTRAP}" = "true" ]; then extra+=(-var "api_bootstrap=true"); fi
+          terraform plan -no-color -lock-timeout=10m -var-file="${TF_ENV}.tfvars" "${extra[@]}" -out=tfplan
+
+      - name: terraform apply
+        run: terraform apply -no-color -lock-timeout=10m tfplan
+
+      - name: Summarise outputs
+        run: |
+          {
+            echo "### Terraform outputs (${TF_ENV})"
+            echo '```json'
+            terraform output -json github_environment_variables
+            echo '```'
+            echo "API: $(terraform output -raw api_url)"
+            echo "Site: https://$(terraform output -raw site_hostname)"
+            echo "Admin: https://$(terraform output -raw admin_hostname)"
+          } >> "$GITHUB_STEP_SUMMARY"

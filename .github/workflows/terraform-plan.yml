@@ -1,0 +1,157 @@
+# Runs on every pull request that touches infrastructure code:
+#   1. static: terraform fmt -check, terraform validate for every environment, repository consistency checks
+#   2. plan:   terraform plan for dev, nonprod and prod (matrix), posted as one comment per environment on the PR
+#
+# Authentication: GitHub OIDC -> the environment's "infra" service principal (created by scripts/setup-github-oidc.ps1).
+# No secret is stored anywhere. The provider and the state backend both use ARM_USE_OIDC.
+# Required repository variables: AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID, AZURE_CLIENT_ID_DEV, AZURE_CLIENT_ID_NONPROD,
+# AZURE_CLIENT_ID_PROD. Pull requests from forks are skipped (GitHub gives them no OIDC token, by design).
+#
+# Note: prod's committed tfvars carry placeholders (SMS gateway URL, alert email). Until they are replaced the prod plan
+# FAILS on purpose (variable validation); the other environments are unaffected (fail-fast is off).
+name: terraform-plan
+
+on:
+  pull_request:
+    paths:
+      - "envs/**"
+      - "modules/**"
+      - "tools/**"
+      - ".github/workflows/terraform-*.yml"
+
+permissions: {}
+
+concurrency:
+  group: terraform-plan-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  TF_VERSION: "1.9.8"
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+
+jobs:
+  static:
+    name: fmt, validate, consistency
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: terraform fmt
+        run: terraform fmt -check -recursive -diff
+
+      - name: terraform validate (every environment)
+        run: |
+          set -euo pipefail
+          for env in dev nonprod prod; do
+            echo "::group::validate ${env}"
+            terraform -chdir="envs/${env}" init -backend=false
+            terraform -chdir="envs/${env}" validate
+            echo "::endgroup::"
+          done
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Repository consistency checks (wiring, env parity, protected/unprotected twins)
+        # The cross-check against the backend's config.py needs the backend-api repository next to this one; run
+        #   python tools/check-consistency.py --backend ../backend-api
+        # locally (or add a checkout of that repository here if it is readable with the workflow token).
+        run: |
+          pip install --quiet python-hcl2
+          python tools/check-consistency.py --no-backend
+
+  plan:
+    name: plan (${{ matrix.env }})
+    needs: static
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - env: dev
+            client_id: ${{ vars.AZURE_CLIENT_ID_DEV }}
+          - env: nonprod
+            client_id: ${{ vars.AZURE_CLIENT_ID_NONPROD }}
+          - env: prod
+            client_id: ${{ vars.AZURE_CLIENT_ID_PROD }}
+    permissions:
+      contents: read
+      id-token: write # OIDC token request
+      pull-requests: write # the plan comment
+    env:
+      ARM_USE_OIDC: "true"
+      ARM_CLIENT_ID: ${{ matrix.client_id }}
+      ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      TF_ENV: ${{ matrix.env }}
+    defaults:
+      run:
+        working-directory: envs/${{ matrix.env }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: terraform init
+        run: terraform init -backend-config=backend.hcl
+
+      - name: terraform plan
+        id: plan
+        shell: bash
+        run: |
+          set +e
+          terraform plan -no-color -lock-timeout=5m -var-file="${TF_ENV}.tfvars" -out=tfplan -detailed-exitcode > plan.out 2>&1
+          code=$?
+          echo "exitcode=${code}" >> "$GITHUB_OUTPUT"
+          cat plan.out
+          exit 0
+
+      - name: Comment the plan on the pull request
+        if: always()
+        uses: actions/github-script@v7
+        env:
+          PLAN_EXIT_CODE: ${{ steps.plan.outputs.exitcode }}
+        with:
+          script: |
+            const fs = require('fs');
+            const env = process.env.TF_ENV;
+            const code = process.env.PLAN_EXIT_CODE;
+            const file = `envs/${env}/plan.out`;
+            let text = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '(no plan output: the job failed before terraform plan ran)';
+            const max = 60000;
+            if (text.length > max) text = text.slice(0, max) + '\n... (truncated, see the workflow run log)';
+            const status = code === '0' ? 'no changes' : code === '2' ? 'changes to apply' : 'FAILED';
+            const marker = `<!-- terraform-plan-${env} -->`;
+            const body = `${marker}\n### Terraform plan: \`${env}\` - ${status}\n\n<details><summary>Show plan</summary>\n\n\`\`\`\n${text}\n\`\`\`\n</details>\n\nCommit ${context.sha.slice(0, 7)}, [workflow run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})`;
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number });
+            const existing = comments.find(c => c.body && c.body.startsWith(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+            }
+
+      - name: Fail the job if the plan failed
+        if: steps.plan.outputs.exitcode == '1'
+        run: |
+          echo "terraform plan failed for ${TF_ENV}; see the log above."
+          exit 1
