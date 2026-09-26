@@ -31,6 +31,7 @@ locals {
     TRUSTED_HOSTS              = var.trusted_hosts
     OTP_PROVIDER               = var.otp_provider
     OTP_WEBHOOK_URL            = var.otp_webhook_url
+    OTP_STATIC_TEST_CODE       = var.otp_static_test_code
     DECLARATION_NOTICE_VERSION = var.declaration_notice_version
     MIN_APP_VERSION            = var.min_app_version
     # .env.dev sets EXPOSE_DEV_OTP=true for laptops; in Azure it is always off (the API refuses it in nonprod/prod).

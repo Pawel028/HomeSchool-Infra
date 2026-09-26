@@ -51,7 +51,11 @@ resource "azurerm_postgresql_flexible_server" "protected" {
 
   lifecycle {
     prevent_destroy = true
-    ignore_changes  = [storage_mb]
+    # zone is ignored for the same reason as storage_mb: Azure auto-assigns an availability zone at creation
+    # time when none is set, and the Flexible Server API only allows changing it later via an HA
+    # failover-exchange, not a plain update - without this a later plan tries to "unset" it and fails with
+    # "zone can only be changed when exchanged with the zone specified in high_availability.0.standby_availability_zone".
+    ignore_changes = [storage_mb, zone]
   }
 }
 
@@ -98,7 +102,8 @@ resource "azurerm_postgresql_flexible_server" "unprotected" {
   tags = var.tags
 
   lifecycle {
-    ignore_changes = [storage_mb]
+    # See the matching comment on azurerm_postgresql_flexible_server.protected above.
+    ignore_changes = [storage_mb, zone]
   }
 }
 

@@ -25,6 +25,7 @@ api_max_replicas = 3
 log_level        = "INFO"
 
 otp_provider = "console" # testers read the code from the log; never use real phone numbers here
+otp_static_test_code = "482915" # every OTP is this fixed code while we finish the real SMS gateway; tell testers to use it
 seed_publish = true
 
 static_web_app_sku = "Free"

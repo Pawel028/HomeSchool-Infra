@@ -206,6 +206,12 @@ variable "otp_webhook_url" {
   default     = ""
 }
 
+variable "otp_static_test_code" {
+  description = "TESTING ONLY: forces every generated OTP to this fixed value instead of a random one. Must be empty in prod (the API refuses to start otherwise)."
+  type        = string
+  default     = ""
+}
+
 variable "declaration_notice_version" {
   description = "DECLARATION_NOTICE_VERSION."
   type        = string

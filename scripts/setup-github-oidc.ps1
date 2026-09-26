@@ -76,14 +76,27 @@ function Invoke-AzRetry {
 
 function Get-OrCreate-AppRegistration {
     param([Parameter(Mandatory)][string]$DisplayName)
-    $appId = Invoke-Az @('ad', 'app', 'list', '--display-name', $DisplayName, '--query', "[?displayName=='$DisplayName'] | [0].appId", '-o', 'tsv')
+    # NOTE: using '-o json' + ConvertFrom-Json rather than a bracket/pipe JMESPath '--query' string.
+    # az on Windows resolves to az.cmd, a batch-file wrapper; an unquoted argument containing
+    # '(' ')' '[' ']' '|' '@' can be misparsed by cmd.exe before Azure CLI ever sees it (this is what
+    # broke Set-RoleAssignment's 'length(@)' query below). Filtering in PowerShell avoids the whole class of bug.
+    $apps = @()
+    $appsJson = Invoke-Az @('ad', 'app', 'list', '--display-name', $DisplayName, '-o', 'json')
+    if ($appsJson) { $apps = @($appsJson | ConvertFrom-Json) }
+    # Under Set-StrictMode, ".appId" on a $null (no match) throws "property cannot be found" -
+    # guard with .Count before indexing, same pattern as the service-principal lookup below.
+    $matchingApps = @($apps | Where-Object { $_.displayName -eq $DisplayName })
+    $appId = if ($matchingApps.Count -gt 0) { $matchingApps[0].appId } else { $null }
     if (-not $appId) {
         Write-Host "  creating app registration $DisplayName"
         $appId = Invoke-Az @('ad', 'app', 'create', '--display-name', $DisplayName, '--sign-in-audience', 'AzureADMyOrg', '--query', 'appId', '-o', 'tsv')
     }
     else { Write-Host "  app registration $DisplayName exists" }
 
-    $spId = Invoke-Az @('ad', 'sp', 'list', '--filter', "appId eq '$appId'", '--query', '[0].id', '-o', 'tsv')
+    $sps = @()
+    $spsJson = Invoke-Az @('ad', 'sp', 'list', '--filter', "appId eq '$appId'", '-o', 'json')
+    if ($spsJson) { $sps = @($spsJson | ConvertFrom-Json) }
+    $spId = if ($sps.Count -gt 0) { $sps[0].id } else { $null }
     if (-not $spId) {
         Write-Host '  creating service principal'
         $spId = Invoke-Az @('ad', 'sp', 'create', '--id', $appId, '--query', 'id', '-o', 'tsv')
@@ -93,7 +106,12 @@ function Get-OrCreate-AppRegistration {
 
 function Set-FederatedCredential {
     param([Parameter(Mandatory)][string]$AppId, [Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][string]$Subject)
-    $existing = Invoke-Az @('ad', 'app', 'federated-credential', 'list', '--id', $AppId, '--query', "[?name=='$Name'] | [0].name", '-o', 'tsv')
+    $creds = @()
+    $credsJson = Invoke-Az @('ad', 'app', 'federated-credential', 'list', '--id', $AppId, '-o', 'json')
+    if ($credsJson) { $creds = @($credsJson | ConvertFrom-Json) }
+    # Same StrictMode guard as above: check .Count before indexing/property access.
+    $matchingCreds = @($creds | Where-Object { $_.name -eq $Name })
+    $existing = if ($matchingCreds.Count -gt 0) { $matchingCreds[0].name } else { $null }
     if ($existing) { Write-Host "  federated credential $Name exists ($Subject)"; return }
     $body = [ordered]@{
         name        = $Name
@@ -117,8 +135,10 @@ function Set-RoleAssignment {
         [Parameter(Mandatory)][string]$ObjectId, [Parameter(Mandatory)][string]$Role, [Parameter(Mandatory)][string]$Scope,
         [string]$Condition
     )
-    $have = Invoke-Az @('role', 'assignment', 'list', '--assignee', $ObjectId, '--role', $Role, '--scope', $Scope, '--query', 'length(@)', '-o', 'tsv')
-    if ($have -ne '0') { Write-Host "  role '$Role' already assigned"; return }
+    $existingAssignments = @()
+    $existingAssignmentsJson = Invoke-Az @('role', 'assignment', 'list', '--assignee', $ObjectId, '--role', $Role, '--scope', $Scope, '-o', 'json')
+    if ($existingAssignmentsJson) { $existingAssignments = @($existingAssignmentsJson | ConvertFrom-Json) }
+    if ($existingAssignments.Count -gt 0) { Write-Host "  role '$Role' already assigned"; return }
     $args2 = @('role', 'assignment', 'create', '--assignee-object-id', $ObjectId, '--assignee-principal-type', 'ServicePrincipal', '--role', $Role, '--scope', $Scope)
     if ($Condition) { $args2 += @('--condition', $Condition, '--condition-version', '2.0') }
     Invoke-AzRetry $args2 | Out-Null

@@ -324,6 +324,12 @@ variable "otp_webhook_url" {
   }
 }
 
+variable "otp_static_test_code" {
+  description = "TESTING ONLY: every generated OTP becomes this fixed value so testers can share one known code instead of each needing real SMS delivery. Leave empty for normal random codes."
+  type        = string
+  default     = ""
+}
+
 variable "declaration_notice_version" {
   description = "DECLARATION_NOTICE_VERSION."
   type        = string

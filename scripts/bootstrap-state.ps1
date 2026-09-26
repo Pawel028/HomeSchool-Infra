@@ -129,8 +129,15 @@ Write-Host "`n[4/6] Storage Blob Data Contributor for the signed-in user"
 $userId = $null
 try { $userId = Invoke-Az @('ad', 'signed-in-user', 'show', '--query', 'id', '-o', 'tsv') } catch { $userId = $null }
 if ($userId) {
-    $has = Invoke-Az @('role', 'assignment', 'list', '--assignee', $userId, '--role', 'Storage Blob Data Contributor', '--scope', $storageId, '--query', 'length(@)', '-o', 'tsv')
-    if ($has -eq '0') {
+    # NOTE: deliberately using '-o json' + ConvertFrom-Json here instead of a '--query length(@)'
+    # JMESPath expression. az on Windows resolves to az.cmd, a batch-file wrapper; when PowerShell
+    # forwards an argument containing '(' ')' '@' to a .cmd file, cmd.exe's own line parsing can
+    # choke on those characters before Azure CLI ever sees them (surfaces as a bogus
+    # "'-o' was unexpected at this time" cmd.exe error). Counting in PowerShell avoids that class of bug.
+    $existingAssignmentsJson = Invoke-Az @('role', 'assignment', 'list', '--assignee', $userId, '--role', 'Storage Blob Data Contributor', '--scope', $storageId, '-o', 'json')
+    $existingAssignments = @()
+    if ($existingAssignmentsJson) { $existingAssignments = @($existingAssignmentsJson | ConvertFrom-Json) }
+    if ($existingAssignments.Count -eq 0) {
         Invoke-Az @('role', 'assignment', 'create', '--assignee-object-id', $userId, '--assignee-principal-type', 'User',
             '--role', 'Storage Blob Data Contributor', '--scope', $storageId) | Out-Null
         Write-Host '  assigned'
@@ -160,8 +167,13 @@ Write-Host '  ready'
 # --- 6. Lock -----------------------------------------------------------------------------------------------------
 if (-not $SkipLock) {
     Write-Host "`n[6/6] CanNotDelete lock on $ResourceGroupName"
-    $lockCount = Invoke-Az @('lock', 'list', '--resource-group', $ResourceGroupName, '--query', "length([?name=='lock-tfstate'])", '-o', 'tsv')
-    if ($lockCount -eq '0') {
+    # Same reasoning as step 4: avoid a parens/brackets-laden '--query' JMESPath expression going
+    # through PowerShell -> az.cmd -> cmd.exe, and count in PowerShell instead.
+    $existingLocksJson = Invoke-Az @('lock', 'list', '--resource-group', $ResourceGroupName, '-o', 'json')
+    $existingLocks = @()
+    if ($existingLocksJson) { $existingLocks = @($existingLocksJson | ConvertFrom-Json) }
+    $lockCount = @($existingLocks | Where-Object { $_.name -eq 'lock-tfstate' }).Count
+    if ($lockCount -eq 0) {
         Invoke-Az @('lock', 'create', '--name', 'lock-tfstate', '--lock-type', 'CanNotDelete', '--resource-group', $ResourceGroupName) | Out-Null
         Write-Host '  created'
     }

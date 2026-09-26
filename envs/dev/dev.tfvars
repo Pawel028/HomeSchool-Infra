@@ -26,6 +26,7 @@ api_max_replicas = 2
 log_level        = "DEBUG"
 
 otp_provider = "console" # the code is written to the log; read it in Log Analytics
+otp_static_test_code = "482915" # every OTP is this fixed code while we finish the real SMS gateway; tell testers to use it
 seed_publish = true
 
 # Local web development against the Azure dev API (dev only).
